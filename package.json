@@ -1,0 +1,43 @@
+{
+  "name": "dsh-handoff-button",
+  "version": "0.1.0",
+  "description": "Handoff button for DeepSeek Harness: adds a button to every assistant message that writes a handoff document of the current conversation into the workspace /handoff directory.",
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "plugin",
+    "handoff",
+    "cordis",
+    "agent"
+  ],
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "assets/write.png"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.19"
+  },
+  "license": "MIT"
+}
