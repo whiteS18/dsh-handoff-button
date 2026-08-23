@@ -6,7 +6,8 @@ DeepSeek Harness 插件：在每条 AI 回复的底部操作行添加一个 Hand
 ## 功能
 
 - **按钮**：每条已完成的 AI 回复操作组最右侧（复制/反馈按钮之后）的圆形图标按钮
-  （Magnific "Write" 图标，内嵌 base64，无网络依赖），悬停有 Tooltip 提示
+  （Magnific "Write" 图标，独立文件 `assets/write.png`，由 Host 路由同源提供，无外部网络依赖），
+  悬停有 Tooltip 提示。**想换图标：直接替换 `assets/write.png` 后重启即可**
 - **生成**：点击后调用 LLM（当前默认模型）按原版 [handoff skill](https://www.skills.sh/mattpocock/skills/handoff) 要求
   生成总结式文档：`Status / Goal / Progress / Next Steps / Suggested Skills` 五段结构，
   Progress 为紧凑总结而非对话实录；LLM 不可用时自动降级为启发式摘要
@@ -35,13 +36,17 @@ dsh plugin --profile <name> add /绝对路径/dsh-handoff-button
 
 ## 架构
 
-- `index.js` — Host 半部：注册 `POST /handoff/write`（生成文档）与
-  `GET /handoff/read`（打开文档）两个路由（`webServer` 服务），读取会话日志
+- `index.js` — Host 半部：注册三个路由（`webServer` 服务）：
+  `POST /handoff/write`（生成文档）、`GET /handoff/read`（打开文档）、
+  `GET /handoff/icon`（提供 `assets/write.png` 图标）。读取会话日志
   （`sessionQuery`）并写文件（`fs`，自动建目录），调用 LLM 总结（`llm` +
-  `agentDefaultModel`，零 import、纯自包含）。
+  `agentDefaultModel`）。仅依赖 Node 内置模块（`node:fs`/`node:url`/`node:path`），
+  无第三方运行时依赖。
 - `client.js` — 浏览器半部：通过 client module loader
   （`window.__ModuleLoader__.load`）注册，向 `conversation.chat.assistant-actions`
-  槽注入按钮（`order: 100`，最右侧插槽条目），点击后同源 `fetch` 调用 Host 路由。
+  槽注入按钮（`order: 100`，最右侧插槽条目），点击后同源 `fetch` 调用 Host 路由；
+  图标通过 CSS mask 引用 `/handoff/icon`，颜色跟随主题。
+- `assets/write.png` — 按钮图标（Magnific/Freepik "Write" 图标），可自由替换。
 - `cordis.patch.yml` — Bundle 补丁层：把本包作为插件行插入组合。
 
 ## 卸载
