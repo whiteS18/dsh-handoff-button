@@ -12,6 +12,11 @@
  *   3. writes it to `<workspace>/handoff/handoff-{yyyymmddhhmmss}-{title}.md`
  *      (parent dir auto-created by the fs backend).
  *
+ * References are rebased to the workspace root before writing, so the
+ * handoff document lists files as paths relative to `cwd` — readable on any
+ * machine, not just the one that generated it (workspace-external paths like
+ * /tmp stay absolute).
+ *
  * Conversation extraction: user messages keep their full text; assistant
  * messages are grouped per turn (turn/start boundaries) and only the LAST
  * assistant message of each turn contributes its text blocks — with
@@ -24,7 +29,7 @@
  */
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 
 export const name = 'dsh-handoff-button'
 
@@ -176,6 +181,7 @@ async function writeHandoff(ctx, args) {
   //    and tool-derived references.
   const rows = extractRows(events)
   const { refs, skills } = extractReferences(events)
+  const relRefs = relativizeRefs(cwd, refs)
 
   // 4. Summarize: LLM first (per the handoff skill), heuristic digest as fallback.
   const transcript = buildTranscript(rows.slice(-20))
@@ -197,7 +203,7 @@ async function writeHandoff(ctx, args) {
   const safeTitle = sanitize(title)
   const filename = 'handoff-' + stamp + '-' + safeTitle + '.md'
   const rel = 'handoff/' + filename
-  const content = composeDocument({ title, sessionId, cwd, rel, body, refs, mode, llmNote })
+  const content = composeDocument({ title, sessionId, cwd, rel, body, refs: relRefs, mode, llmNote })
 
   // 6. Write (parent dir handoff/ is created automatically).
   const target = await fs.resolve(rel, { cwd })
@@ -395,6 +401,37 @@ function looksLikePath(v) {
   return true
 }
 
+/**
+ * Rebase references onto the workspace root so the handoff document stays
+ * meaningful across machines: paths inside the workspace become relative to
+ * `cwd` (the same root the next agent will open), while paths outside it
+ * (system dirs like /tmp, home, …) stay absolute since they have no shared
+ * anchor. Deduplicates after rebasing — the same file may be touched both as
+ * an absolute path and as a `./`-relative one.
+ * @param cwd - the workspace root the document is written under.
+ * @param refs - raw references extracted from tool calls.
+ * @returns references rebased to the workspace root, deduplicated.
+ */
+function relativizeRefs(cwd, refs) {
+  if (!refs || refs.length === 0) return refs
+  const root = (cwd || '').replace(/[\\/]+$/, '')
+  const seen = new Set()
+  const out = []
+  for (const ref of refs) {
+    let display = ref
+    if (root && isAbsolute(ref)) {
+      const rel = relative(root, ref)
+      // Inside the workspace (rel is a plain relative path not escaping with ..):
+      if (rel && !rel.startsWith('..') && !isAbsolute(rel)) display = rel.split(sep).join('/')
+    }
+    if (display === '.') continue
+    if (seen.has(display)) continue
+    seen.add(display)
+    out.push(display)
+  }
+  return out
+}
+
 /* ------------------------------------------------------------------ *
  * Document composition.                                               *
  * ------------------------------------------------------------------ */
@@ -411,7 +448,7 @@ function composeDocument({ title, sessionId, cwd, rel, body, refs, mode, llmNote
   lines.push('')
   lines.push('## References（参考资料）')
   lines.push('')
-  lines.push('- 工作区根目录：' + cwd)
+  lines.push('- 工作区根目录：' + cwd + '（以下相对路径均相对于该目录）')
   lines.push('- 本文件：' + rel)
   for (const r of refs) lines.push('- ' + r)
   lines.push('')
