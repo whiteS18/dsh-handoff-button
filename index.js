@@ -14,8 +14,9 @@
  *
  * References are rebased to the workspace root before writing, so the
  * handoff document lists files as paths relative to `cwd` — readable on any
- * machine, not just the one that generated it (workspace-external paths like
- * /tmp stay absolute).
+ * machine, not just the one that generated it. Only workspace-internal
+ * paths are kept: system dirs, /tmp, the harness home, and other projects
+ * are dropped as machine-specific noise.
  *
  * Conversation extraction: user messages keep their full text; assistant
  * messages are grouped per turn (turn/start boundaries) and only the LAST
@@ -365,6 +366,30 @@ function buildTranscript(rows) {
  * References: paths touched by tools + skills actually used.          *
  * ------------------------------------------------------------------ */
 
+/** System / transient prefixes that are never project references. */
+const NON_PROJECT_PREFIXES = [
+  '/usr', '/opt', '/Applications', '/System', '/bin', '/sbin',
+  '/Library', '/private', '/etc', '/var', '/dev', '/tmp',
+]
+
+/** Probe / temp file names that are never references (e.g. .write-test). */
+const NOISE_PATH_RE = /(^|[\\/])(\.write-test|\.probe-test|_tmp_|\.tmp)([\\/]|$)/
+
+/** PATH-style entries that are never references. */
+const NOISE_PATH_SEGMENTS = ['node_modules/.bin', '/bin/', '/sbin/']
+
+function isNoisePath(v) {
+  if (typeof v !== 'string' || !v) return true
+  for (const prefix of NON_PROJECT_PREFIXES) {
+    if (v === prefix || v.startsWith(prefix + '/')) return true
+  }
+  if (NOISE_PATH_RE.test(v)) return true
+  for (const segment of NOISE_PATH_SEGMENTS) {
+    if (v.includes(segment)) return true
+  }
+  return false
+}
+
 function extractReferences(events) {
   const refs = new Set()
   const skills = new Set()
@@ -380,13 +405,13 @@ function extractReferences(events) {
     }
     for (const k of pathKeys) {
       const v = args[k]
-      if (typeof v === 'string' && v && looksLikePath(v)) refs.add(v)
+      if (typeof v === 'string' && v && looksLikePath(v) && !isNoisePath(v)) refs.add(v)
     }
-    if (typeof args.workdir === 'string' && args.workdir) refs.add(args.workdir)
+    if (typeof args.workdir === 'string' && args.workdir && !isNoisePath(args.workdir)) refs.add(args.workdir)
     if (name === 'bash' && typeof args.command === 'string') {
       for (const m of args.command.matchAll(/(?:^|\s)((?:\/[\w.\-]+){2,}|\.\.?\/[\w.\-/]+|\/[\w.\-/]+\.[\w]+)/g)) {
         const p = m[1].trim()
-        if (looksLikePath(p)) refs.add(p)
+        if (looksLikePath(p) && !isNoisePath(p)) refs.add(p)
       }
     }
   }
@@ -403,14 +428,15 @@ function looksLikePath(v) {
 
 /**
  * Rebase references onto the workspace root so the handoff document stays
- * meaningful across machines: paths inside the workspace become relative to
- * `cwd` (the same root the next agent will open), while paths outside it
- * (system dirs like /tmp, home, …) stay absolute since they have no shared
- * anchor. Deduplicates after rebasing — the same file may be touched both as
- * an absolute path and as a `./`-relative one.
+ * meaningful across machines. Only paths INSIDE the workspace are kept —
+ * they become relative to `cwd`, the same root the next agent will open.
+ * Everything outside the workspace (system dirs, /tmp, the harness home,
+ * other projects) is dropped: it has no shared anchor and is pure noise
+ * for a handoff reader. Deduplicates after rebasing — the same file may be
+ * touched both as an absolute path and as a `./`-relative one.
  * @param cwd - the workspace root the document is written under.
  * @param refs - raw references extracted from tool calls.
- * @returns references rebased to the workspace root, deduplicated.
+ * @returns workspace-internal references as cwd-relative paths.
  */
 function relativizeRefs(cwd, refs) {
   if (!refs || refs.length === 0) return refs
@@ -418,13 +444,19 @@ function relativizeRefs(cwd, refs) {
   const seen = new Set()
   const out = []
   for (const ref of refs) {
-    let display = ref
+    if (isNoisePath(ref)) continue
+    let display
     if (root && isAbsolute(ref)) {
       const rel = relative(root, ref)
-      // Inside the workspace (rel is a plain relative path not escaping with ..):
-      if (rel && !rel.startsWith('..') && !isAbsolute(rel)) display = rel.split(sep).join('/')
+      // Keep only paths inside the workspace: rel is plain, does not escape with ..
+      if (!rel || rel.startsWith('..') || isAbsolute(rel)) continue
+      display = rel.split(sep).join('/')
+    } else if (ref.startsWith('..')) {
+      continue // relative path escaping the workspace — no shared anchor
+    } else {
+      display = ref
     }
-    if (display === '.') continue
+    if (display === '.' || display === '') continue
     if (seen.has(display)) continue
     seen.add(display)
     out.push(display)
