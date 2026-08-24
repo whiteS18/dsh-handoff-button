@@ -32,7 +32,16 @@ dsh plugin --profile <name> add dsh-handoff-button
 dsh plugin --profile <name> add /绝对路径/dsh-handoff-button
 ```
 
-然后重启 `dsh`（Web UI 或桌面应用）使组合生效。
+> [!IMPORTANT]
+> **启动顺序决定是否需要重启。** DSH 的插件 bundle 组合发生在进程**启动时**（Loader 读取
+> profile 的 `package.json` 生成插件树和 client 模块图），安装命令只改磁盘上的 profile 文件，
+> 不会热插进已在运行的进程：
+>
+> - **先安装 → 再启动**：启动时插件已在列表里，直接生效，无需重启；
+> - **先启动 → 再安装**：装完后**必须完全退出并重新启动** `dsh`（⌘Q 退出桌面应用或终止
+>   Web UI 进程，不是刷新页面），让进程重新组合 profile。
+>
+> 安装后可用 `dsh --profile <name> --dump-config | grep handoff` 确认插件已进入 bundle 层。
 
 ## 架构
 
