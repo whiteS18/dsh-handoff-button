@@ -39,5 +39,11 @@
   "engines": {
     "node": ">=22.19"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whiteS18/dsh-handoff-button.git"
+  },
+  "bugs": "https://github.com/whiteS18/dsh-handoff-button/issues",
+  "homepage": "https://github.com/whiteS18/dsh-handoff-button#readme"
 }
