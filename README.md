@@ -1,6 +1,4 @@
 # dsh-handoff-button  
-# [![dshfind](https://dshfind.com/api/badge/whiteS18/dsh-handoff-button?lang=zh)](https://dshfind.com/zh/plugins/whiteS18/dsh-handoff-button?ref=badge)
-
 DeepSeek Harness 插件：在每条 AI 回复的底部操作行添加一个 Handoff 按钮，
 点击后把当前会话压缩成 handoff 文档，写入该会话工作区的 `handoff/` 目录。  
 
