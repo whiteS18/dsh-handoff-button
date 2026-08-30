@@ -1,6 +1,6 @@
 {
   "name": "dsh-handoff-button",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Handoff button for DeepSeek Harness: adds a button to every assistant message that writes a handoff document of the current conversation into the workspace /handoff directory.",
   "keywords": [
     "deepseek",
