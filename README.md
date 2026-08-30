@@ -69,6 +69,99 @@ dsh plugin --profile <name> remove dsh-handoff-button
 - 组合加载：`dsh --profile <name> --dump-config | grep -A2 handoff`
 - 浏览器检查：`http://127.0.0.1:3080/plugins/dsh-handoff-button/client.js` 应返回脚本
 
-## 许可
+---
+
+## English
+
+DeepSeek Harness plugin: adds a Handoff button to the action row of every
+assistant message. Clicking it compresses the current conversation into a
+handoff document and writes it to the `handoff/` directory of that session's
+workspace.
+
+### Features
+
+- **Button**: a circular icon button at the far right of the action group on
+  every completed assistant message (after the copy/feedback buttons), with a
+  hover tooltip. The icon (`assets/write.png`) is served same-origin by a host
+  route — no external network dependency. **To change the icon, replace
+  `assets/write.png` and restart.**
+- **Generation**: on click, the current default LLM model writes a summary
+  document in the five-section structure of the original
+  [handoff skill](https://www.skills.sh/mattpocock/skills/handoff):
+  `Status / Goal / Progress / Next Steps / Suggested Skills`, where Progress
+  is a compact summary rather than a raw transcript. Falls back to a
+  heuristic digest when the LLM is unavailable.
+- **Feedback**: dims while generating → green ✓ on success (auto-reverts
+  after 2s) → red ⚠ on failure (hover for the reason).
+- **Open file**: while the ✓ state is shown, click again to open the
+  generated document in a new tab.
+- **Filename**: `handoff-{yyyymmddhhmmss}-{session title}.md` (illegal
+  characters replaced with `-`, max 60 chars); `handoff/` is created
+  automatically if missing.
+- **Redaction**: API keys, tokens, passwords and similar secrets are masked
+  before anything is written to disk.
+- **References**: collects file paths actually touched in the conversation,
+  keeping only workspace-internal files rewritten as paths relative to the
+  workspace root (readable across machines and collaborators); Suggested
+  Skills lists the skills actually invoked.
+
+### Install
+
+Once published to npm (or from a local package directory):
+
+```sh
+dsh plugin --profile <name> add dsh-handoff-button
+```
+
+Local development checkout:
+
+```sh
+dsh plugin --profile <name> add /absolute/path/dsh-handoff-button
+```
+
+> [!IMPORTANT]
+> **Startup order decides whether a restart is needed.** DSH composes the
+> plugin bundle at process **startup**; the install command only rewrites
+> profile files on disk and does not hot-plug a running process:
+>
+> - **Install → start**: the plugin is already in the list at startup, no
+>   restart needed.
+> - **Start → install**: you **must fully quit and restart** `dsh` (⌘Q the
+>   desktop app or kill the Web UI process — a page refresh is not enough).
+>
+> After installing, `dsh --profile <name> --dump-config | grep handoff`
+> confirms the plugin is in the bundle layer.
+
+### Architecture
+
+- `index.js` — host half: registers three routes (`webServer` service):
+  `POST /handoff/write` (generates the document), `GET /handoff/read` (opens
+  it), `GET /handoff/icon` (serves `assets/write.png`). Reads the session
+  log (`sessionQuery`), writes files (`fs`, creating directories as needed),
+  and calls the LLM (`llm` + `agentDefaultModel`). Node builtins only — no
+  third-party runtime dependencies.
+- `client.js` — browser half: registered via the client module loader
+  (`window.__ModuleLoader__.load`), injects the button into the
+  `conversation.chat.assistant-actions` slot (`order: 100`, rightmost), and
+  calls the host routes with same-origin `fetch`. The icon is applied via a
+  CSS mask referencing `/handoff/icon`, so it follows the theme color.
+- `assets/write.png` — the button icon (Magnific/Freepik "Write"), freely
+  replaceable.
+- `cordis.patch.yml` — bundle patch layer: inserts this package as a plugin
+  row in the composition.
+
+### Uninstall
+
+```sh
+dsh plugin --profile <name> remove dsh-handoff-button
+```
+
+### Verify
+
+- Bundle composition: `dsh --profile <name> --dump-config | grep -A2 handoff`
+- Browser check: `http://127.0.0.1:3080/plugins/dsh-handoff-button/client.js`
+  should return the script
+
+## License / 许可
 
 MIT
