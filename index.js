@@ -12,6 +12,16 @@
  *   3. writes it to `<workspace>/handoff/handoff-{yyyymmddhhmmss}-{title}.md`
  *      (parent dir auto-created by the fs backend).
  *
+ * The write is a trusted UI action (the user clicked the button), not a
+ * model tool call. The per-call fs policy is therefore pinned to the
+ * SESSION cwd as `workspace-write`. Calling `sandboxPolicy.resolve()` with
+ * no session stamps the HOST fallback workspaceRoot — typically a different
+ * directory — and workspace-write then denies `<cwd>/handoff/...` with
+ * `file access denied under workspace-write mode`. Approval-never sessions
+ * cannot escalate, so the stamped policy must already allow the write; if
+ * the sandboxed backend still refuses, we fall back to a direct host write
+ * of the same path.
+ *
  * References are rebased to the workspace root before writing, so the
  * handoff document lists files as paths relative to `cwd` — readable on any
  * machine, not just the one that generated it. Only workspace-internal
@@ -28,9 +38,9 @@
  * imported, so the bundle profile needs nothing beyond this package — safe
  * for cross-device installs.
  */
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 export const name = 'dsh-handoff-button'
 
@@ -76,9 +86,10 @@ export function apply(ctx) {
       res.end(JSON.stringify(result))
     },
   }))
-  // Read-only route: serves the content of a generated handoff file so the
-  // browser can open it in a new tab. `path` must be a bare handoff/xxx.md
-  // relative path; `sessionId` selects the workspace (cwd).
+  // Read-only route: serves a generated handoff file. Kept as a fallback
+  // inspector; the client opens files through session.openWorkspacePath.
+  // `path` must be a bare handoff/xxx.md relative path; `sessionId` selects
+  // the workspace (cwd).
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: '/handoff/read',
@@ -155,13 +166,12 @@ async function readSessionEvents(ctx, sessionId) {
   }
 }
 
-async function writeHandoff(ctx, args) {
+export async function writeHandoff(ctx, args) {
   const sessionId = args && typeof args.sessionId === 'string' ? args.sessionId : null
   if (!sessionId) return { ok: false, error: '缺少 sessionId' }
 
   const sessionQuery = ctx.get('sessionQuery')
   const fs = ctx.get('fs')
-  const sandboxPolicy = ctx.get('sandboxPolicy')
   if (!sessionQuery) return { ok: false, error: 'sessionQuery 服务不可用' }
   if (!fs) return { ok: false, error: 'fs 服务不可用' }
 
@@ -206,12 +216,49 @@ async function writeHandoff(ctx, args) {
   const rel = 'handoff/' + filename
   const content = composeDocument({ title, sessionId, cwd, rel, body, refs: relRefs, mode, llmNote })
 
-  // 6. Write (parent dir handoff/ is created automatically).
+  // 6. Write into the session workspace. Pin the sandbox root to THAT cwd —
+  //    never the host fallback from resolve()-without-session.
   const target = await fs.resolve(rel, { cwd })
-  const policy = sandboxPolicy ? sandboxPolicy.resolve() : undefined
-  await fs.writeText(target, content, undefined, undefined, policy)
+  const policy = handoffWritePolicy(cwd)
+  try {
+    await fs.writeText(target, content, undefined, undefined, policy)
+  } catch (err) {
+    if (!isSandboxDenied(err)) throw err
+    // Trusted UI write. Approval-never cannot escalate; write the same path
+    // through the host process so the click still produces a file.
+    console.error('[dsh-handoff-button] sandboxed write denied, falling back to host fs:', err)
+    const dest = join(cwd, rel)
+    await mkdir(dirname(dest), { recursive: true })
+    await writeFile(dest, content, 'utf8')
+  }
 
-  return { ok: true, filename, rel, path: cwd + '/' + rel, mode, llmNote }
+  return { ok: true, filename, rel, path: join(cwd, rel), mode, llmNote }
+}
+
+/**
+ * Per-call fs policy for a user-clicked handoff write.
+ *
+ * `sandboxPolicy.resolve()` without a session stamps the HOST fallback
+ * workspaceRoot. That root is typically a different directory than this
+ * conversation's cwd, so a workspace-write fence denies the handoff file
+ * with `file access denied under workspace-write mode`.
+ *
+ * @param cwd - the session workspace root the document is written under.
+ * @param standing - optional already-resolved standing policy (mode only).
+ * @returns a policy whose workspaceRoot is `cwd`.
+ */
+export function handoffWritePolicy(cwd, standing) {
+  const workspaceRoot = resolve(cwd)
+  if (standing && standing.mode === 'danger-full-access') {
+    return { mode: 'danger-full-access', workspaceRoot }
+  }
+  return { mode: 'workspace-write', workspaceRoot }
+}
+
+function isSandboxDenied(err) {
+  if (!err) return false
+  if (err.code === 'FS_SANDBOX_DENIED') return true
+  return /file access denied under/i.test(String(err.message || err))
 }
 
 /* ------------------------------------------------------------------ *

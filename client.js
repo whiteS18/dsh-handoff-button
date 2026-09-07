@@ -16,8 +16,9 @@
  * - idle: history icon — click POSTs to `/handoff/write` (same origin).
  * - busy: dimmed history icon (disabled).
  * - done: green check icon for ~2s, then auto-resets to idle. Clicking in the
- *   done state re-opens the generated file (GET `/handoff/read`) in a new
- *   tab instead of generating again.
+ *   done state opens the generated file through the Host
+ *   (`remote.session.openWorkspacePath`) so DSH / better-sidebar can show it
+ *   in the in-app editor instead of a raw browser tab.
  * - error: red warning icon (click retries).
  *
  * This file is a classic script registered through the client module loader:
@@ -58,20 +59,63 @@ window.__ModuleLoader__.load({
       return React.createElement('span', { className: 'dsh-handoff-icon', 'aria-hidden': true });
     }
 
+    function isAbsolutePath(value) {
+      return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/');
+    }
+
+    function resolveOpenPath(absPath, rel, cwd) {
+      if (absPath && isAbsolutePath(absPath)) return absPath;
+      if (rel && isAbsolutePath(rel)) return rel;
+      if (!rel) return '';
+      if (!cwd) return rel;
+      return String(cwd).replace(/[/\\]+$/, '') + '/' + String(rel).replace(/^[/\\]+/, '');
+    }
+
+    function sessionRemote(ctx) {
+      if (ctx.remote && ctx.remote.session) return ctx.remote.session;
+      if (typeof ctx.get === 'function') return ctx.get('remote.session') || null;
+      return null;
+    }
+
+    async function openInApp(ctx, path) {
+      const session = sessionRemote(ctx);
+      if (!session || typeof session.openWorkspacePath !== 'function') {
+        throw new Error('无法在软件内打开文件（remote.session 不可用）');
+      }
+      const result = await session.openWorkspacePath({ path: path });
+      if (result && result.ok === false) {
+        const err = result.error;
+        throw new Error((err && err.message) || '打开失败');
+      }
+    }
+
     function HandoffButton(props, ctx) {
       const [state, setState] = React.useState('idle');
       const [rel, setRel] = React.useState(''); // relative path of the generated file
+      const [absPath, setAbsPath] = React.useState('');
       const sessionId = props && props.sessionId;
       const messageId = props && props.messageId;
+      const useSessions = props && props.useSessions;
+      const cwd = useSessions ? useSessions(function (s) {
+        const row = s && s.byId && sessionId ? s.byId[sessionId] : null;
+        return row && row.cwd ? row.cwd : '';
+      }) : '';
       const onClick = async () => {
         if (state === 'busy') return;
         if (state === 'done') {
-          // Re-click after success: open the generated file in a new tab.
-          if (rel) window.open('/handoff/read?sessionId=' + encodeURIComponent(sessionId) + '&path=' + encodeURIComponent(rel));
+          const target = resolveOpenPath(absPath, rel, cwd);
+          if (!target) return;
+          try {
+            await openInApp(ctx, target);
+          } catch (err) {
+            setState('error');
+            setRel(String((err && err.message) || '打开失败'));
+          }
           return;
         }
         setState('busy');
         setRel('');
+        setAbsPath('');
         try {
           const res = await fetch('/handoff/write', {
             method: 'POST',
@@ -81,6 +125,7 @@ window.__ModuleLoader__.load({
           const data = await res.json();
           if (data && data.ok === true) {
             setRel(String(data.rel || ''));
+            setAbsPath(String(data.path || ''));
             setState('done');
             // Auto-reset to the initial state after ~2s.
             ctx.timeout(() => setState('idle'), 2000);
@@ -113,7 +158,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    const inject = ['slots', 'timer'];
+    const inject = ['slots', 'timer', 'remote', 'remote.session'];
 
     function apply(ctx) {
       injectStyle();

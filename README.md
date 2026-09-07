@@ -12,11 +12,12 @@ DeepSeek Harness 插件：在每条 AI 回复的底部操作行添加一个 Hand
   生成总结式文档：`Status / Goal / Progress / Next Steps / Suggested Skills` 五段结构，
   Progress 为紧凑总结而非对话实录；LLM 不可用时自动降级为启发式摘要
 - **状态反馈**：生成中变暗 → 完成显示绿色 ✓（2 秒自动复原）→ 失败显示红色 ⚠（悬停可见原因）
-- **打开文件**：完成状态（✓ 期间）再次点击，在新标签页打开生成的文档
+- **打开文件**：完成状态（✓ 期间）再次点击，通过 DSH `openWorkspacePath` 在软件内打开（安装了 better-sidebar 时进侧边栏编辑器；否则走系统默认应用）。不再打开浏览器原始 URL。
 - **文件名**：`handoff-{yyyymmddhhmmss}-{会话标题}.md`（非法字符替换为 `-`，最长 60 字符），
   `handoff/` 目录不存在时自动创建
 - **脱敏**：API key、token、密码等常见敏感信息在写入前自动打码
 - **References**：自动收集会话中实际触碰过的文件路径，**只保留工作区内的文件，统一转换为相对工作区根目录的相对路径**（跨机器/多人协作可读；工作区外的系统路径、临时目录、本机配置等一律不收录）；Suggested Skills 列出会话中实际调用过的技能
+- **沙箱**：写入围栏钉在**该会话工作区**，而不是 host 默认根目录，因此不会出现 `file access denied under workspace-write mode`；若会话 approval 为 never（无法升级沙箱），仍会写入 `handoff/`
 
 ## 安装
 
@@ -49,8 +50,10 @@ dsh plugin --profile <name> add /绝对路径/dsh-handoff-button
   `POST /handoff/write`（生成文档）、`GET /handoff/read`（打开文档）、
   `GET /handoff/icon`（提供 `assets/write.png` 图标）。读取会话日志
   （`sessionQuery`）并写文件（`fs`，自动建目录），调用 LLM 总结（`llm` +
-  `agentDefaultModel`）。仅依赖 Node 内置模块（`node:fs`/`node:url`/`node:path`），
-  无第三方运行时依赖。
+  `agentDefaultModel`）。写入把沙箱围栏钉在**该会话的工作区根目录**上
+  （用户点击，不是模型工具）；若沙箱仍拒绝（例如 approval 为 never
+  无法升级），则回退为 Node 直接写入同一路径。仅依赖 Node 内置模块
+  （`node:fs`/`node:url`/`node:path`），无第三方运行时依赖。
 - `client.js` — 浏览器半部：通过 client module loader
   （`window.__ModuleLoader__.load`）注册，向 `conversation.chat.assistant-actions`
   槽注入按钮（`order: 100`，最右侧插槽条目），点击后同源 `fetch` 调用 Host 路由；
@@ -68,6 +71,7 @@ dsh plugin --profile <name> remove dsh-handoff-button
 
 - 组合加载：`dsh --profile <name> --dump-config | grep -A2 handoff`
 - 浏览器检查：`http://127.0.0.1:3080/plugins/dsh-handoff-button/client.js` 应返回脚本
+- 回归测试：`npm test`
 
 ---
 
@@ -94,7 +98,9 @@ workspace.
 - **Feedback**: dims while generating → green ✓ on success (auto-reverts
   after 2s) → red ⚠ on failure (hover for the reason).
 - **Open file**: while the ✓ state is shown, click again to open the
-  generated document in a new tab.
+  generated document in the app via `openWorkspacePath` (sidebar editor
+  when better-sidebar is installed; otherwise the OS default app). It
+  no longer opens a raw browser URL.
 - **Filename**: `handoff-{yyyymmddhhmmss}-{session title}.md` (illegal
   characters replaced with `-`, max 60 chars); `handoff/` is created
   automatically if missing.
@@ -104,6 +110,11 @@ workspace.
   keeping only workspace-internal files rewritten as paths relative to the
   workspace root (readable across machines and collaborators); Suggested
   Skills lists the skills actually invoked.
+- **Sandbox**: the write fence is pinned to **that session's workspace**,
+  not the host fallback root, so it no longer fails with
+  `file access denied under workspace-write mode`. If the session's
+  approval policy is `never` (escalation impossible), the file is still
+  written to `handoff/`.
 
 ### Install
 
@@ -138,8 +149,12 @@ dsh plugin --profile <name> add /absolute/path/dsh-handoff-button
   `POST /handoff/write` (generates the document), `GET /handoff/read` (opens
   it), `GET /handoff/icon` (serves `assets/write.png`). Reads the session
   log (`sessionQuery`), writes files (`fs`, creating directories as needed),
-  and calls the LLM (`llm` + `agentDefaultModel`). Node builtins only — no
-  third-party runtime dependencies.
+  and calls the LLM (`llm` + `agentDefaultModel`). The write pins the
+  sandbox fence to **that session's workspace root** (the user clicked;
+  this is not a model tool call). If the sandbox still refuses (for
+  example when approval is `never` and escalation is impossible), it
+  falls back to a direct Node write of the same path. Node builtins only
+  — no third-party runtime dependencies.
 - `client.js` — browser half: registered via the client module loader
   (`window.__ModuleLoader__.load`), injects the button into the
   `conversation.chat.assistant-actions` slot (`order: 100`, rightmost), and
@@ -161,6 +176,7 @@ dsh plugin --profile <name> remove dsh-handoff-button
 - Bundle composition: `dsh --profile <name> --dump-config | grep -A2 handoff`
 - Browser check: `http://127.0.0.1:3080/plugins/dsh-handoff-button/client.js`
   should return the script
+- Regression tests: `npm test`
 
 ## License / 许可
 
