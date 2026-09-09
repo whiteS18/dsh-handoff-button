@@ -1,7 +1,7 @@
 {
   "name": "dsh-handoff-button",
-  "version": "0.1.3",
-  "description": "Handoff button for DeepSeek Harness: adds a button to every assistant message that writes a handoff document of the current conversation into the workspace /handoff directory.",
+  "version": "0.1.4",
+  "description": "Handoff button for DeepSeek Harness: adds a button to every assistant message that writes a whole-session handoff document into the workspace /handoff directory.",
   "keywords": [
     "deepseek",
     "deepseek-harness",
@@ -14,7 +14,7 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
-    "test": "node --test test"
+    "test": "node --test test/*.test.js"
   },
   "exports": {
     ".": "./index.js",

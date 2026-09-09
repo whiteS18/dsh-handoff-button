@@ -100,7 +100,7 @@ window.__ModuleLoader__.load({
         const row = s && s.byId && sessionId ? s.byId[sessionId] : null;
         return row && row.cwd ? row.cwd : '';
       }) : '';
-      const onClick = async () => {
+      const onClick = async (ev) => {
         if (state === 'busy') return;
         if (state === 'done') {
           const target = resolveOpenPath(absPath, rel, cwd);
@@ -113,6 +113,12 @@ window.__ModuleLoader__.load({
           }
           return;
         }
+        let focus = '';
+        if (ev && ev.altKey) {
+          const typed = window.prompt('下一会话的关注点？（可留空，将总结整段会话）', '');
+          if (typed === null) return;
+          focus = String(typed).trim();
+        }
         setState('busy');
         setRel('');
         setAbsPath('');
@@ -120,7 +126,7 @@ window.__ModuleLoader__.load({
           const res = await fetch('/handoff/write', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId, messageId }),
+            body: JSON.stringify({ sessionId, messageId, focus }),
           });
           const data = await res.json();
           if (data && data.ok === true) {
@@ -142,7 +148,7 @@ window.__ModuleLoader__.load({
       if (state === 'done') icon = React.createElement(IconCheckOutline16);
       else if (state === 'error') icon = React.createElement(IconWarningOutline16);
       else icon = React.createElement(IconHistory);
-      let tip = '生成 handoff 文档到工作区 /handoff';
+      let tip = '生成整段会话的 handoff 文档到工作区 /handoff（Alt+点击可指定下一会话关注点）';
       if (state === 'done') tip = '已生成：' + rel + '（点击重新打开）';
       else if (state === 'error') tip = rel;
       const label = state === 'done' ? '打开生成的 handoff 文档' : '生成 handoff 文档';

@@ -28,11 +28,22 @@
  * paths are kept: system dirs, /tmp, the harness home, and other projects
  * are dropped as machine-specific noise.
  *
- * Conversation extraction: user messages keep their full text; assistant
- * messages are grouped per turn (turn/start boundaries) and only the LAST
- * assistant message of each turn contributes its text blocks — with
- * reasoning-model traces, earlier steps contain thinking, so taking the
- * final message avoids leaking chain-of-thought into the handoff.
+ * Conversation extraction follows the handoff skill: summarize the CURRENT
+ * conversation so a FRESH agent can continue THIS work — not merely the
+ * latest turns. User messages keep their full text (original goal, later
+ * redirects). Assistant messages are grouped per turn (turn/start
+ * boundaries) and only the LAST assistant message of each turn contributes
+ * its text blocks — with reasoning-model traces, earlier steps contain
+ * thinking, so taking the final message avoids leaking chain-of-thought.
+ * When the session is long, the LLM transcript keeps the opening goal/plan
+ * and the latest status, preferring user messages; omitted middle assistant
+ * turns are assumed to live in referenced artifacts (specs/plans/ADRs).
+ * Optional `focus` (skill arguments) is treated as the next session's
+ * concentration, not as a replacement for the original goal.
+ *
+ * Unlike the agent-invoked skill, this plugin writes into the session
+ * workspace (`handoff/`) rather than the OS temp directory: the user clicked
+ * a button and needs a durable file that `openWorkspacePath` can open.
  *
  * Deliberately dependency-free: only Node built-ins (node:fs, node:url) are
  * imported, so the bundle profile needs nothing beyond this package — safe
@@ -189,23 +200,27 @@ export async function writeHandoff(ctx, args) {
   const events = await readSessionEvents(ctx, sessionId)
 
   // 3. Extract per-turn rows (user messages + final assistant reply per turn)
-  //    and tool-derived references.
+  //    and tool-derived references. Optional `focus` is the skill argument:
+  //    what the next session should concentrate on.
   const rows = extractRows(events)
   const { refs, skills } = extractReferences(events)
   const relRefs = relativizeRefs(cwd, refs)
+  const focus = readFocus(args)
 
-  // 4. Summarize: LLM first (per the handoff skill), heuristic digest as fallback.
-  const transcript = buildTranscript(rows.slice(-20))
+  // 4. Summarize the whole job (original goal + current state), not just the
+  //    last few turns. LLM first; heuristic digest as fallback.
+  const selected = selectTranscriptRows(rows)
+  const transcript = buildTranscript(selected)
   let body
   let mode = 'fallback'
   let llmNote = ''
   try {
-    body = await summarizeWithLlm(ctx, sessionId, title, cwd, transcript)
+    body = await summarizeWithLlm(ctx, sessionId, { title, cwd, transcript, refs: relRefs, skills, focus })
     mode = 'llm'
   } catch (err) {
     llmNote = String((err && err.message) || err)
     console.error('[dsh-handoff-button] LLM summary failed, using heuristic digest:', err)
-    body = heuristicSummary(title, rows, skills)
+    body = heuristicSummary(title, rows, skills, focus)
   }
 
   // 5. Compose the document.
@@ -214,7 +229,7 @@ export async function writeHandoff(ctx, args) {
   const safeTitle = sanitize(title)
   const filename = 'handoff-' + stamp + '-' + safeTitle + '.md'
   const rel = 'handoff/' + filename
-  const content = composeDocument({ title, sessionId, cwd, rel, body, refs: relRefs, mode, llmNote })
+  const content = composeDocument({ title, sessionId, cwd, rel, body, refs: relRefs, mode, llmNote, focus })
 
   // 6. Write into the session workspace. Pin the sandbox root to THAT cwd —
   //    never the host fallback from resolve()-without-session.
@@ -266,7 +281,7 @@ function isSandboxDenied(err) {
  * message's text blocks (reasoning/tool-call blocks are skipped).     *
  * ------------------------------------------------------------------ */
 
-function extractRows(events) {
+export function extractRows(events) {
   const rows = []
   let pending = null // last assistant message of the current turn
   const flush = () => {
@@ -296,11 +311,106 @@ function extractRows(events) {
   return rows
 }
 
+/**
+ * Pick rows so a fresh agent can continue the WHOLE job, not just the tail.
+ *
+ * User messages carry the original goal and later redirects — keep them
+ * preferentially. Assistant messages keep the opening plan and the latest
+ * status; middle assistant turns are assumed to live in referenced artifacts.
+ * Gaps become an explicit omission marker so the summarizer does not invent
+ * the skipped work.
+ *
+ * @param rows - extractRows() output, chronological.
+ * @param options.maxRows - max content rows (omission markers extra). Default 24.
+ */
+export function selectTranscriptRows(rows, options) {
+  const maxRows = options && Number.isFinite(options.maxRows) && options.maxRows > 0
+    ? Math.floor(options.maxRows)
+    : 24
+  if (!Array.isArray(rows) || rows.length === 0) return []
+  if (rows.length <= maxRows) return rows.slice()
+
+  const userIdx = []
+  const otherIdx = []
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i] && rows[i].kind === '用户') userIdx.push(i)
+    else otherIdx.push(i)
+  }
+
+  const chosen = new Set()
+  // Original goal.
+  if (userIdx.length) chosen.add(userIdx[0])
+  else chosen.add(0)
+  // Current state.
+  chosen.add(rows.length - 1)
+  // Opening plan (first assistant / non-user), if distinct.
+  if (otherIdx.length) chosen.add(otherIdx[0])
+
+  // Remaining user messages from the tail (latest redirects first).
+  for (let k = userIdx.length - 1; k >= 0; k--) {
+    if (chosen.size >= maxRows) break
+    chosen.add(userIdx[k])
+  }
+  // Remaining other messages from the tail (latest status first).
+  for (let k = otherIdx.length - 1; k >= 0; k--) {
+    if (chosen.size >= maxRows) break
+    chosen.add(otherIdx[k])
+  }
+
+  const ordered = [...chosen].sort((a, b) => a - b)
+  return stitchWithOmissions(rows, ordered)
+}
+
+function stitchWithOmissions(rows, indices) {
+  const out = []
+  let prev = -1
+  for (const i of indices) {
+    // A one-row hole is usually the assistant reply between two kept user
+    // messages — not worth a marker. Larger holes are the omitted middle.
+    if (prev >= 0 && i - prev > 2) {
+      out.push({
+        kind: '省略',
+        text: '（中间 ' + (i - prev - 1) + ' 条已省略。中段进展以 References 中的工件为准，不要臆造。）',
+      })
+    }
+    out.push(rows[i])
+    prev = i
+  }
+  return out
+}
+
 /* ------------------------------------------------------------------ *
  * LLM summarization (dependency-free: hand-rolled message + chunks).  *
  * ------------------------------------------------------------------ */
 
-async function summarizeWithLlm(ctx, sessionId, title, cwd, transcript) {
+export function buildLlmUserText({ title, cwd, transcript, refs, skills, focus }) {
+  const lines = []
+  lines.push('Session title: ' + title)
+  lines.push('Workspace: ' + cwd)
+  if (focus) {
+    lines.push('Next session focus (treat as what the continuation should concentrate on): ' + focus)
+  }
+  lines.push('')
+  lines.push('Artifacts already on disk (reference by relative path or URL; do not quote or restate them):')
+  if (refs && refs.length) {
+    for (const r of refs) lines.push('- ' + r)
+  } else {
+    lines.push('- (none extracted)')
+  }
+  lines.push('')
+  lines.push('Skills already used in this session (hint for Suggested Skills; suggest what the NEXT agent should load):')
+  if (skills && skills.length) {
+    for (const s of skills) lines.push('- ' + s)
+  } else {
+    lines.push('- (none)')
+  }
+  lines.push('')
+  lines.push('Conversation transcript (text only). Opening goal/plan and latest turns are included; middle assistant turns may be omitted when they should already live in the artifacts above. Do not invent omitted work.')
+  lines.push(transcript)
+  return lines.join('\n')
+}
+
+async function summarizeWithLlm(ctx, sessionId, { title, cwd, transcript, refs, skills, focus }) {
   const llm = ctx.get('llm')
   const modelService = ctx.get('agentDefaultModel')
   if (!llm || !modelService) throw new Error('llm 服务不可用')
@@ -310,7 +420,7 @@ async function summarizeWithLlm(ctx, sessionId, title, cwd, transcript) {
   }
 
   const system = [
-    'You are writing a handoff document so a fresh AI agent can continue the current work.',
+    'You are writing a handoff document so a fresh AI agent with no prior context can continue the current work.',
     'Write a markdown document containing exactly these sections:',
     '## Status',
     '## Goal',
@@ -319,16 +429,19 @@ async function summarizeWithLlm(ctx, sessionId, title, cwd, transcript) {
     '## Suggested Skills',
     'Rules:',
     '- Status: one short line (in progress / blocked / done, with a reason).',
+    '- Goal: the original objective and any explicit later restatements or constraints. Take this from the start of the conversation; do not replace it with a merely recent sub-task unless the user clearly changed the goal.',
     '- Progress: a COMPACT summary of what was done, decided, and the current state. Never paste raw conversation text — summarize it.',
     '- Next Steps: concrete ordered actions for the continuation agent.',
-    '- Suggested Skills: 2-5 skills the next agent should load, or "none" if not needed.',
-    '- Do not duplicate content already captured in files or other artifacts; reference them by relative path or URL instead of quoting.',
+    '- Suggested Skills: 2-5 skills the next agent should load with the skill tool, or "none" if not needed. Include already-used skills when they are still relevant.',
+    '- Do not duplicate content already captured in files or other artifacts (specs, plans, ADRs, issues, commits, diffs). Reference them by relative path or URL instead of quoting.',
+    '- The transcript may omit middle assistant turns. Treat omitted turns as recorded in the listed artifacts. Do not invent work that is not in the transcript or artifact list.',
+    '- If a Next session focus is provided, treat it as what the next session should concentrate on: keep the overall Goal accurate, and bias Next Steps toward that focus.',
     '- Redact any sensitive information: API keys, passwords, tokens, personally identifiable information.',
     '- Use the language of the conversation.',
     '- Keep the whole document under 500 words.',
   ].join('\n')
 
-  const userText = 'Session title: ' + title + '\nWorkspace: ' + cwd + '\n\nConversation transcript (most recent messages, text only):\n' + transcript
+  const userText = buildLlmUserText({ title, cwd, transcript, refs, skills, focus })
   const options = {
     provider: selection.provider,
     model: selection.model,
@@ -368,7 +481,9 @@ async function summarizeWithLlm(ctx, sessionId, title, cwd, transcript) {
  * Heuristic fallback digest (no model available).                     *
  * ------------------------------------------------------------------ */
 
-function heuristicSummary(title, rows, skills) {
+function heuristicSummary(title, rows, skills, focus) {
+  const firstUser = rows.find((row) => row && row.kind === '用户')
+  const selected = selectTranscriptRows(rows, { maxRows: 12 })
   const lines = []
   lines.push('## Status')
   lines.push('')
@@ -377,10 +492,12 @@ function heuristicSummary(title, rows, skills) {
   lines.push('## Goal')
   lines.push('')
   lines.push('- ' + title)
+  if (firstUser) lines.push('- ' + clamp(firstUser.text, 400))
+  if (focus) lines.push('- 下一会话关注点：' + focus)
   lines.push('')
   lines.push('## Progress')
   lines.push('')
-  for (const row of rows.slice(-10)) {
+  for (const row of selected) {
     lines.push('### ' + row.kind + (row.model ? '（' + row.model + '）' : '') + (row.time ? ' · ' + row.time : ''))
     lines.push('')
     lines.push(clamp(row.text, 240))
@@ -388,11 +505,16 @@ function heuristicSummary(title, rows, skills) {
   }
   lines.push('## Next Steps')
   lines.push('')
-  lines.push('- 接手方请基于上方进展继续推进；需要完整上下文时请查阅原会话。')
+  if (focus) {
+    lines.push('- 接手方请优先推进：' + focus)
+    lines.push('- 需要完整上下文时请查阅原会话与 References 中的工件。')
+  } else {
+    lines.push('- 接手方请基于 Goal 与上方进展继续推进；需要完整上下文时请查阅原会话与 References 中的工件。')
+  }
   lines.push('')
   lines.push('## Suggested Skills')
   lines.push('')
-  if (skills.length > 0) {
+  if (skills && skills.length > 0) {
     for (const s of skills) lines.push('- ' + s)
   } else {
     lines.push('- 未指定')
@@ -404,7 +526,8 @@ function buildTranscript(rows) {
   const parts = []
   for (const row of rows) {
     parts.push('### ' + row.kind + (row.model ? '（' + row.model + '）' : '') + (row.time ? ' · ' + row.time : ''))
-    parts.push(clamp(row.text, 1200))
+    const max = row.kind === '用户' ? 2000 : row.kind === '省略' ? 200 : 800
+    parts.push(clamp(row.text, max))
   }
   return parts.join('\n\n')
 }
@@ -515,13 +638,14 @@ function relativizeRefs(cwd, refs) {
  * Document composition.                                               *
  * ------------------------------------------------------------------ */
 
-function composeDocument({ title, sessionId, cwd, rel, body, refs, mode, llmNote }) {
+function composeDocument({ title, sessionId, cwd, rel, body, refs, mode, llmNote, focus }) {
   const lines = []
   lines.push('# Handoff：' + title)
   lines.push('')
   lines.push('> 由 DSH Handoff 插件自动生成' + (mode === 'llm' ? '（模型总结）' : '（降级摘要）'))
   lines.push('> 生成时间：' + new Date().toISOString())
   lines.push('> 会话：' + sessionId)
+  if (focus) lines.push('> 下一会话关注点：' + focus)
   lines.push('')
   lines.push(body)
   lines.push('')
@@ -570,6 +694,14 @@ function redact(text) {
     .replace(/(api[_-]?key|apikey)\s*[:=]\s*(['"]?)[^\s'"]{8,}\2/gi, '$1: ***')
     .replace(/(password|passwd|secret|bearer\s+token)\s*[:=]\s*(['"]?)[^\s'"]{8,}\2/gi, '$1: ***')
     .replace(/(Bearer\s+)[A-Za-z0-9._-]{12,}/g, 'Bearer ***')
+}
+
+/** Skill argument: what the next session should concentrate on. */
+function readFocus(args) {
+  if (!args || typeof args.focus !== 'string') return ''
+  const trimmed = redact(args.focus.trim())
+  if (!trimmed) return ''
+  return trimmed.length > 500 ? trimmed.slice(0, 500) + '…' : trimmed
 }
 
 function clamp(text, max) {
